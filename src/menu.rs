@@ -121,7 +121,8 @@ pub fn context_menu<'a>(
     entity: segmented_button::Entity,
 ) -> Element<'a, Message> {
     fn key_style(theme: &cosmic::Theme) -> TextStyle {
-        let mut color = theme.cosmic().background(theme.transparent).component.on;
+        // TODO use wayland popups
+        let mut color = theme.cosmic().background(false).component.on;
         color.alpha *= 0.75;
         TextStyle {
             color: Some(color.into()),
@@ -162,7 +163,7 @@ pub fn context_menu<'a>(
     //TODO: move style to libcosmic
     .style(|theme| {
         let cosmic = theme.cosmic();
-        let component = &cosmic.background(theme.transparent).component;
+        let component = &cosmic.background(false).component;
         widget::container::Style {
             icon_color: Some(component.on.into()),
             text_color: Some(component.on.into()),
