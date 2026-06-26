@@ -18,6 +18,9 @@ paste = "1.0.15"
 patch = "0.7.0"
 regex = "1.11"
 serde = { version = "1", features = ["serde_derive"] }
+serde_json = "1"
+url = "2"
+dnd = { git = "https://github.com/pop-os/window_clipboard", tag = "sctk-0.20" }
 tokio = { version = "1", features = ["process", "time"] }
 # Extra syntax highlighting
 syntect = "5.2.0"
@@ -47,7 +50,7 @@ features = ["syntect", "vi"]
 git = "https://github.com/pop-os/libcosmic.git"
 default-features = false
 #TODO: a11y feature crashes file choser dialog
-features = ["about", "multi-window", "tokio", "winit", "surface-message"]
+features = ["about", "multi-window", "tokio", "winit", "surface-message", "xdg-portal"]
 
 [target.'cfg(unix)'.dependencies]
 fork = "0.2"

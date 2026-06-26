@@ -279,6 +279,21 @@ impl EditorTab {
         editor.changed()
     }
 
+    pub fn text(&self) -> String {
+        let editor = self.editor.lock().unwrap();
+        editor_text(&editor)
+    }
+
+    pub fn set_text(&mut self, text: &str, is_modified: bool) {
+        let mut editor = self.editor.lock().unwrap();
+        let mut font_system = font_system().write().unwrap();
+        let mut editor = editor.borrow_with(font_system.raw());
+        editor.with_buffer_mut(|buffer| {
+            buffer.set_text(text, &self.attrs, cosmic_text::Shaping::Advanced, None);
+        });
+        editor.set_changed(is_modified);
+    }
+
     pub fn icon(&self, size: u16) -> icon::Icon {
         match &self.path_opt {
             Some(path) => icon::icon(mime_icon(mime_for_path(path, None, false), size)).size(size),

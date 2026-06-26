@@ -1,0 +1,9 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Name=Cosmic Edit (Dev)
+Comment=Editor de texto COSMIC (Desenvolvimento)
+Exec=/mnt/disco_d/projetos/rust/cosmic-edit/scripts/run.sh
+Icon=/mnt/disco_d/projetos/rust/cosmic-edit/scripts/com.system76.CosmicEdit.svg
+Terminal=false
+Type=Application
+Categories=Development;TextEditor;

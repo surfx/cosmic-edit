@@ -29,6 +29,7 @@ use cosmic_text::{Cursor, Edit, Family, Selection, SwashCache, SyntaxSystem, ViM
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
+use std::borrow::Cow;
 use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
@@ -66,6 +67,9 @@ mod project;
 use self::search::ProjectSearchResult;
 mod search;
 
+use self::session::{Session, SessionTab, backups_dir_path};
+mod session;
+
 use self::tab::{EditorTab, GitDiffTab, Tab};
 mod tab;
 
@@ -88,7 +92,37 @@ pub fn monospace_attrs() -> cosmic_text::Attrs<'static> {
     cosmic_text::Attrs::new().family(Family::Monospace)
 }
 
+fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
+    let s = String::from_utf8_lossy(data);
+    let mut paths = Vec::new();
+    for line in s.lines() {
+        let line = line.trim().trim_matches('\0');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Ok(url) = url::Url::parse(line) {
+            if url.scheme() == "file" {
+                if let Ok(path) = url.to_file_path() {
+                    paths.push(path);
+                }
+            }
+        } else if line.starts_with('/') {
+            paths.push(PathBuf::from(line));
+        }
+    }
+    paths
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut builder = env_logger::Builder::from_default_env();
+    builder
+        .filter_level(log::LevelFilter::Info)
+        .filter_module("cosmic_config", log::LevelFilter::Off)
+        .filter_module("wgpu_hal", log::LevelFilter::Error)
+        .filter_module("wgpu_core", log::LevelFilter::Error)
+        .filter_module("iced_winit", log::LevelFilter::Error)
+        .init();
+
     #[cfg(all(unix, not(target_os = "redox")))]
     match fork::daemon(true, true) {
         Ok(fork::Fork::Child) => (),
@@ -139,8 +173,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             theme_set,
         }
     });
-
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     localize::localize();
 
@@ -334,6 +366,7 @@ enum NewTab {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum Message {
+    None,
     AppTheme(AppTheme),
     AutoScroll(Option<f32>),
     Config(Config),
@@ -362,6 +395,9 @@ pub enum Message {
     FindSearchValueChanged(String),
     FindUseRegex(bool),
     FindWrapAround(bool),
+    FileDropped(Vec<PathBuf>),
+    FileTransferRequested(String),
+    FileTransferResult(Result<Vec<String>, String>),
     Focus(window::Id),
     GitProjectStatus(Vec<(String, PathBuf, Vec<GitStatus>)>),
     GitStage(PathBuf, PathBuf),
@@ -438,7 +474,6 @@ pub enum ContextPage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DialogPage {
     PromptSaveClose(segmented_button::Entity),
-    PromptSaveQuit(Vec<segmented_button::Entity>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -467,6 +502,7 @@ pub struct App {
     theme_names: Vec<String>,
     context_page: ContextPage,
     text_box_id: widget::Id,
+    dnd_id: widget::Id,
     auto_scroll: Option<(f32, u32)>,
     dialog_opt: Option<Dialog<Message>>,
     dialog_page_opt: Option<DialogPage>,
@@ -558,6 +594,7 @@ impl App {
 
     pub fn open_project<P: AsRef<Path>>(&mut self, path: P) {
         let path = path.as_ref();
+        log::info!("// REMOVER: open_project called with path: {:?}", path);
         let node = match ProjectNode::new(path) {
             Ok(mut node) => {
                 match &mut node {
@@ -572,11 +609,13 @@ impl App {
 
                         for (_project_name, project_path) in self.projects.iter() {
                             if project_path == path {
+                                log::info!("// REMOVER: Project already open: {:?}", path);
                                 // Project already open
                                 return;
                             }
                         }
 
+                        log::info!("// REMOVER: Adding project {:?} to sidebar", path);
                         // Save the absolute path
                         self.projects.push((name.to_string(), path.to_path_buf()));
                         self.update_watcher();
@@ -616,12 +655,18 @@ impl App {
 
         let position = self.nav_model.position(id).unwrap_or(0);
         self.open_folder(path, position + 1, 1);
+        log::info!("// REMOVER: Project {:?} opened successfully", path);
     }
 
     pub fn open_tab(&mut self, path_opt: Option<PathBuf>) -> Option<segmented_button::Entity> {
-        match self.new_tab(path_opt)? {
-            NewTab::Exists(entity) => Some(entity),
+        log::info!("// REMOVER: open_tab called with path: {:?}", path_opt);
+        match self.new_tab(path_opt.clone())? {
+            NewTab::Exists(entity) => {
+                log::info!("// REMOVER: Tab already exists for {:?}, entity: {:?}", path_opt, entity);
+                Some(entity)
+            }
             NewTab::Tab(tab) => {
+                log::info!("// REMOVER: Creating new EditorTab for {:?}", path_opt);
                 let entity = self
                     .tab_model
                     .insert()
@@ -632,6 +677,7 @@ impl App {
                     .activate()
                     .id();
                 self.update_watcher();
+                log::info!("// REMOVER: New tab created with entity {:?}", entity);
                 Some(entity)
             }
         }
@@ -755,6 +801,149 @@ impl App {
         }
     }
 
+    fn save_session(&self) {
+        log::info!("// REMOVER: Starting save_session");
+        let mut session = Session::default();
+        let backups_dir = backups_dir_path();
+        let _ = fs::remove_dir_all(&backups_dir);
+        if let Err(err) = fs::create_dir_all(&backups_dir) {
+            log::error!("failed to create backups directory: {}", err);
+            return;
+        }
+
+        for (i, entity) in self.tab_model.iter().enumerate() {
+            if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
+                log::info!("// REMOVER: Saving tab {}: {:?}", i, tab.path_opt);
+                let mut backup_path = None;
+                let is_modified = tab.changed();
+                if is_modified {
+                    let bname = format!("backup_{}.txt", i);
+                    let bpath = backups_dir.join(bname);
+                    log::info!("// REMOVER: Creating backup for modified file: {:?}", bpath);
+                    if let Err(err) = fs::write(&bpath, tab.text()) {
+                        log::error!("failed to write backup: {}", err);
+                    } else {
+                        backup_path = Some(bpath);
+                    }
+                }
+
+                let mut mtime = None;
+                if let Some(path) = &tab.path_opt {
+                    if let Ok(metadata) = fs::metadata(path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                                mtime = Some(duration.as_secs());
+                            }
+                        }
+                    }
+                }
+
+                session.tabs.push(SessionTab {
+                    path: tab.path_opt.clone(),
+                    backup_path,
+                    is_modified,
+                    mtime,
+                });
+
+                if self.tab_model.is_active(entity) {
+                    session.active_tab_index = Some(i);
+                }
+            }
+        }
+
+        for (_name, path) in &self.projects {
+            log::info!("// REMOVER: Saving project: {:?}", path);
+            session.projects.push(path.clone());
+        }
+
+        if let Err(err) = session.save() {
+            log::error!("failed to save session: {}", err);
+        }
+        log::info!("// REMOVER: Session saved successfully");
+    }
+
+    fn restore_session(&mut self) {
+        log::info!("// REMOVER: Starting restore_session");
+        let session = Session::load();
+        log::info!("// REMOVER: Loaded session data: {} tabs, {} projects", session.tabs.len(), session.projects.len());
+        for path in session.projects {
+            log::info!("// REMOVER: Restoring project: {:?}", path);
+            self.open_project(path);
+        }
+
+        for (i, stab) in session.tabs.into_iter().enumerate() {
+            log::info!("// REMOVER: Restoring tab {}: path={:?}, modified={}", i, stab.path, stab.is_modified);
+            let entity_opt = if let Some(path) = stab.path {
+                let mut disk_newer = false;
+                if let Some(saved_mtime) = stab.mtime {
+                    if let Ok(metadata) = fs::metadata(&path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                                if duration.as_secs() > saved_mtime {
+                                    log::warn!("// REMOVER: File on disk is newer than session: {:?}", path);
+                                    disk_newer = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let entity = self.open_tab(Some(path));
+                if let Some(entity) = entity {
+                    if !disk_newer {
+                        if let Some(backup_path) = stab.backup_path {
+                            log::info!("// REMOVER: Applying backup for tab {}: {:?}", i, backup_path);
+                            if let Ok(text) = fs::read_to_string(backup_path) {
+                                let title_opt = if let Some(Tab::Editor(tab)) =
+                                    self.tab_model.data_mut::<Tab>(entity)
+                                {
+                                    tab.set_text(&text, true);
+                                    Some(tab.title())
+                                } else {
+                                    None
+                                };
+                                if let Some(title) = title_opt {
+                                    self.tab_model.text_set(entity, title);
+                                }
+                            }
+                        }
+                    }
+                }
+                entity
+            } else {
+                // No path -> scratch tab
+                let entity = self.open_tab(None);
+                if let Some(entity) = entity {
+                    if let Some(backup_path) = stab.backup_path {
+                        log::info!("// REMOVER: Restoring unsaved scratch tab from: {:?}", backup_path);
+                        if let Ok(text) = fs::read_to_string(backup_path) {
+                            let title_opt = if let Some(Tab::Editor(tab)) =
+                                self.tab_model.data_mut::<Tab>(entity)
+                            {
+                                tab.set_text(&text, true);
+                                Some(tab.title())
+                            } else {
+                                None
+                            };
+                            if let Some(title) = title_opt {
+                                self.tab_model.text_set(entity, title);
+                            }
+                        }
+                    }
+                }
+                entity
+            };
+
+            if Some(i) == session.active_tab_index {
+                if let Some(entity) = entity_opt {
+                    log::info!("// REMOVER: Re-activating tab index {}", i);
+                    self.tab_model.activate(entity);
+                }
+            }
+        }
+        log::info!("// REMOVER: Session restoration complete");
+    }
+
     fn update_dialogs(&mut self) -> Task<Message> {
         match self.dialog_page_opt {
             Some(DialogPage::PromptSaveClose(entity)) => {
@@ -766,23 +955,6 @@ impl App {
                 } else {
                     // Tab no longer found, close dialog
                     self.dialog_page_opt = None;
-                }
-            }
-            Some(DialogPage::PromptSaveQuit(ref _entities)) => {
-                let mut unsaved = Vec::new();
-                for entity in self.tab_model.iter() {
-                    if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
-                        if tab.changed() {
-                            unsaved.push(entity);
-                        }
-                    }
-                }
-                if unsaved.is_empty() {
-                    // All tabs have been saved, we can exit
-                    return self.update(Message::QuitForce);
-                } else {
-                    // Update dialog
-                    self.dialog_page_opt = Some(DialogPage::PromptSaveQuit(unsaved));
                 }
             }
             None => {}
@@ -1483,6 +1655,7 @@ impl Application for App {
             theme_names,
             context_page: ContextPage::Settings,
             text_box_id: widget::Id::unique(),
+            dnd_id: widget::Id::unique(),
             auto_scroll: None,
             dialog_opt: None,
             dialog_page_opt: None,
@@ -1503,13 +1676,20 @@ impl Application for App {
 
         // Do not show nav bar by default. Will be opened by open_project if needed
         app.core.nav_bar_set_toggled(false);
+
+        let mut args_provided = false;
         for arg in env::args().skip(1) {
+            args_provided = true;
             let path = PathBuf::from(arg);
             if path.is_dir() {
                 app.open_project(path);
             } else {
                 app.open_tab(Some(path));
             }
+        }
+
+        if !args_provided {
+            app.restore_session();
         }
 
         app.update_nav_bar_placeholder();
@@ -1649,8 +1829,6 @@ impl Application for App {
             return None;
         };
 
-        let cosmic_theme::Spacing { space_xxs, .. } = self.core().system_theme().cosmic().spacing;
-
         match dialog {
             DialogPage::PromptSaveClose(entity) => {
                 let save_button =
@@ -1668,55 +1846,11 @@ impl Application for App {
                     .tertiary_action(cancel_button);
                 Some(dialog.into())
             }
-            DialogPage::PromptSaveQuit(entities) => {
-                let mut can_save_all = true;
-                let mut column = widget::column::with_capacity(entities.len()).spacing(space_xxs);
-                for entity in entities.iter() {
-                    if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(*entity) {
-                        let mut row = widget::row::with_capacity(3).align_y(Alignment::Center);
-                        row = row.push(widget::text(tab.title()));
-                        row = row.push(widget::space::horizontal());
-                        if let Some(_path) = &tab.path_opt {
-                            row = row.push(
-                                widget::button::standard(fl!("save"))
-                                    .on_press(Message::Save(Some(*entity))),
-                            );
-                            //TODO row = row.push(widget::text(format!("{}", path.display())));
-                        } else {
-                            row = row.push(
-                                widget::button::standard(fl!("save-as"))
-                                    .on_press(Message::SaveAsDialog(Some(*entity))),
-                            );
-                            can_save_all = false;
-                        }
-
-                        column = column.push(row);
-                    }
-                }
-
-                let mut save_button = widget::button::suggested(fl!("save-all"));
-                if can_save_all {
-                    save_button = save_button.on_press(Message::SaveAll);
-                }
-                let discard_button =
-                    widget::button::destructive(fl!("discard")).on_press(Message::QuitForce);
-                let cancel_button =
-                    widget::button::text(fl!("cancel")).on_press(Message::DialogCancel);
-                let dialog = widget::dialog()
-                    .title(fl!("prompt-save-changes-title"))
-                    .body(fl!("prompt-unsaved-changes"))
-                    .icon(icon::from_name("dialog-warning-symbolic").size(64))
-                    .control(column)
-                    .primary_action(save_button)
-                    .secondary_action(discard_button)
-                    .tertiary_action(cancel_button);
-
-                Some(dialog.into())
-            }
         }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        log::info!("// REMOVER: App::update received message: {:?}", message);
         // Helper for updating config values efficiently
         macro_rules! config_set {
             ($name: ident, $value: expr) => {
@@ -1739,6 +1873,7 @@ impl Application for App {
             };
         }
         match message {
+            Message::None => {}
             Message::AppTheme(app_theme) => {
                 config_set!(app_theme, app_theme);
                 return self.update_config();
@@ -2047,6 +2182,31 @@ impl Application for App {
                 config_set!(find_wrap_around, find_wrap_around);
                 return self.update_config();
             }
+            Message::FileDropped(paths) => {
+                log::info!("Handling FileDropped: {:?}", paths);
+                for path in paths {
+                    if path.is_dir() {
+                        self.open_project(path);
+                    } else {
+                        self.open_tab(Some(path));
+                    }
+                }
+            }
+            Message::FileTransferRequested(key) => {
+                return cosmic::command::file_transfer_receive(key)
+                    .map(|res| action::app(Message::FileTransferResult(res.map_err(|e| e.to_string()))));
+            }
+            Message::FileTransferResult(result) => {
+                match result {
+                    Ok(files) => {
+                        let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+                        return self.update(Message::FileDropped(paths));
+                    }
+                    Err(err) => {
+                        log::error!("File transfer failed: {}", err);
+                    }
+                }
+            }
             Message::FindFocused(has_focus) => {
                 if let Some(f) = self.find_opt.as_mut() {
                     *f = FindField {
@@ -2141,6 +2301,7 @@ impl Application for App {
                 self.modifiers = modifiers;
             }
             Message::NewFile => {
+                log::info!("// REMOVER: Action: NewFile");
                 self.open_tab(None);
                 return self.update_tab();
             }
@@ -2283,8 +2444,7 @@ impl Application for App {
                     }
                 }
             }
-            Message::NotifyWatcher(mut watcher_wrapper) => match watcher_wrapper.watcher_opt.take()
-            {
+            Message::NotifyWatcher(mut watcher_wrapper) => match watcher_wrapper.watcher_opt.take() {
                 Some(watcher) => {
                     self.watcher_opt = Some((watcher, HashSet::new()));
                     self.update_watcher();
@@ -2294,6 +2454,7 @@ impl Application for App {
                 }
             },
             Message::OpenFile(path) => {
+                log::info!("// REMOVER: Action: OpenFile {:?}", path);
                 self.open_tab(Some(path));
                 return self.update_tab();
             }
@@ -2549,12 +2710,11 @@ impl Application for App {
                 self.dialog_page_opt = Some(DialogPage::PromptSaveClose(entity));
             }
             Message::Quit => {
-                // Create empty dialog
-                self.dialog_page_opt = Some(DialogPage::PromptSaveQuit(Vec::new()));
-                // This update will get the actual list of unsaved tabs
-                return self.update_dialogs();
+                self.save_session();
+                process::exit(0);
             }
             Message::QuitForce => {
+                self.save_session();
                 process::exit(0);
             }
             Message::Redo => {
@@ -2705,6 +2865,7 @@ impl Application for App {
                 }
             },
             Message::TabActivate(entity) => {
+                log::info!("// REMOVER: Action: TabActivate {:?}", entity);
                 // Close save changes dialog if switching to a different tab for consistency
                 if self.dialog_page_opt != Some(DialogPage::PromptSaveClose(entity)) {
                     self.dialog_page_opt = None;
@@ -2729,6 +2890,7 @@ impl Application for App {
                 }
             }
             Message::TabChanged(entity) => {
+                log::info!("// REMOVER: Action: TabChanged {:?}", entity);
                 if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
                     let mut title = tab.title();
                     //TODO: better way of adding change indicator
@@ -2739,6 +2901,7 @@ impl Application for App {
                 }
             }
             Message::TabClose(entity) => {
+                log::info!("// REMOVER: Action: TabClose {:?}", entity);
                 match self.tab_model.data_mut::<Tab>(entity) {
                     // Only match a changed editor tab...
                     Some(Tab::Editor(tab)) if tab.changed() => {
@@ -3289,7 +3452,17 @@ impl Application for App {
 
         // Uncomment to debug layout:
         //content.explain(cosmic::iced::Color::WHITE)
-        content
+        widget::dnd_destination(
+            content,
+            vec![
+                Cow::Borrowed("text/uri-list"),
+            ],
+        )
+        .id(self.dnd_id.clone())
+        .on_finish(|_mime, data, _action, _x, _y| {
+            Message::FileDropped(parse_uri_list(&data))
+        })
+        .into()
     }
 
     fn view_window(&self, window_id: window::Id) -> Element<'_, Message> {
@@ -3320,6 +3493,9 @@ impl Application for App {
                     Some(Message::Modifiers(modifiers))
                 }
                 event::Event::Window(window::Event::Focused) => Some(Message::Focus(window_id)),
+                event::Event::Window(window::Event::FileDropped(paths)) => {
+                    Some(Message::FileDropped(paths))
+                }
                 event::Event::Window(window::Event::CloseRequested) => {
                     Some(Message::CloseWindow(window_id))
                 }
