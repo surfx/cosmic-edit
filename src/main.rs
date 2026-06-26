@@ -80,6 +80,7 @@ static ICON_CACHE: OnceLock<Mutex<IconCache>> = OnceLock::new();
 static LINE_NUMBER_CACHE: OnceLock<Mutex<LineNumberCache>> = OnceLock::new();
 static SWASH_CACHE: OnceLock<Mutex<SwashCache>> = OnceLock::new();
 static SYNTAX_SYSTEM: OnceLock<SyntaxSystem> = OnceLock::new();
+static UNIX_LISTENER: OnceLock<Mutex<Option<std::os::unix::net::UnixListener>>> = OnceLock::new();
 
 pub fn icon_cache_get(name: &'static str, size: u16) -> icon::Icon {
     let mut icon_cache = ICON_CACHE.get().unwrap().lock().unwrap();
@@ -124,12 +125,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     #[cfg(all(unix, not(target_os = "redox")))]
-    match fork::daemon(true, true) {
-        Ok(fork::Fork::Child) => (),
-        Ok(fork::Fork::Parent(_child_pid)) => process::exit(0),
-        Err(err) => {
-            eprintln!("failed to daemonize: {:?}", err);
-            process::exit(1);
+    {
+        let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
+        let socket_path = std::env::temp_dir().join(format!("cosmic-edit-{}.sock", user));
+        let args: Vec<String> = env::args().skip(1).collect();
+
+        if socket_path.exists() {
+            for _ in 0..3 {
+                if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                    use std::io::Write;
+                    let message = if args.is_empty() {
+                        "__FOCUS__".to_string()
+                    } else {
+                        args.join("\n")
+                    };
+                    let _ = stream.write_all(message.as_bytes());
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let _ = std::fs::remove_file(&socket_path);
+        }
+
+        match fork::daemon(true, true) {
+            Ok(fork::Fork::Child) => {
+                if let Ok(listener) = std::os::unix::net::UnixListener::bind(&socket_path) {
+                    let _ = listener.set_nonblocking(true);
+                    UNIX_LISTENER.get_or_init(|| Mutex::new(Some(listener)));
+                }
+            }
+            Ok(fork::Fork::Parent(_child_pid)) => process::exit(0),
+            Err(err) => {
+                eprintln!("failed to daemonize: {:?}", err);
+                process::exit(1);
+            }
         }
     }
 
@@ -904,6 +933,8 @@ impl App {
                                 };
                                 if let Some(title) = title_opt {
                                     self.tab_model.text_set(entity, title);
+                                    // Trigger change indicator update
+                                    let _ = self.update(Message::TabChanged(entity));
                                 }
                             }
                         }
@@ -1677,19 +1708,16 @@ impl Application for App {
         // Do not show nav bar by default. Will be opened by open_project if needed
         app.core.nav_bar_set_toggled(false);
 
-        let mut args_provided = false;
+        // Always restore session first to preserve unsaved changes (backups)
+        app.restore_session();
+
         for arg in env::args().skip(1) {
-            args_provided = true;
             let path = PathBuf::from(arg);
             if path.is_dir() {
                 app.open_project(path);
             } else {
                 app.open_tab(Some(path));
             }
-        }
-
-        if !args_provided {
-            app.restore_session();
         }
 
         app.update_nav_bar_placeholder();
@@ -2455,7 +2483,12 @@ impl Application for App {
             },
             Message::OpenFile(path) => {
                 log::info!("// REMOVER: Action: OpenFile {:?}", path);
-                self.open_tab(Some(path));
+                if path.is_dir() {
+                    self.open_project(path);
+                } else {
+                    self.open_tab(Some(path));
+                }
+                self.save_session();
                 return self.update_tab();
             }
             Message::OpenFileDialog => {
@@ -2755,6 +2788,7 @@ impl Application for App {
                 if let Some(title) = title_opt {
                     self.tab_model.text_set(self.tab_model.active(), title);
                 }
+                self.save_session();
                 return self.update_dialogs();
             }
             Message::SaveAll => {
@@ -2767,6 +2801,7 @@ impl Application for App {
                         tab.save();
                     }
                 }
+                self.save_session();
                 return self.update_dialogs();
             }
             Message::SaveAsDialog(entity_opt) => {
@@ -2872,6 +2907,7 @@ impl Application for App {
                 }
 
                 self.tab_model.activate(entity);
+                self.save_session();
                 return self.update_tab();
             }
             Message::TabActivateJump(pos) => {
@@ -2939,6 +2975,9 @@ impl Application for App {
                 // Remove item
                 self.tab_model.remove(entity);
                 self.update_watcher();
+
+                // Persist session change immediately
+                self.save_session();
 
                 // If that was the last tab, exit the application
                 if self.tab_model.iter().next().is_none() {
@@ -3477,6 +3516,7 @@ impl Application for App {
         struct ConfigSubscription;
         struct ConfigStateSubscription;
         struct ThemeSubscription;
+        struct SingleInstanceSubscription;
 
         let mut subscriptions = vec![
             event::listen_with(|event, status, window_id| match event {
@@ -3609,6 +3649,38 @@ impl Application for App {
                 Some(dialog) => dialog.subscription(),
                 None => Subscription::none(),
             },
+            Subscription::run_with(TypeId::of::<SingleInstanceSubscription>(), |_| {
+                stream::channel(
+                    10,
+                    |mut output: futures::channel::mpsc::Sender<Message>| async move {
+                        let listener =
+                            UNIX_LISTENER.get().and_then(|m| m.lock().unwrap().take());
+
+                        let listener = match listener {
+                            Some(l) => l,
+                            None => return futures::future::pending().await,
+                        };
+
+                        loop {
+                            if let Ok((mut stream, _)) = listener.accept() {
+                                let mut buffer = String::new();
+                                use std::io::Read;
+                                if stream.read_to_string(&mut buffer).is_ok() {
+                                    if buffer == "__FOCUS__" {
+                                        let _ = output.send(Message::None).await;
+                                    } else {
+                                        for line in buffer.lines() {
+                                            let path = PathBuf::from(line);
+                                            let _ = output.send(Message::OpenFile(path)).await;
+                                        }
+                                    }
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    },
+                )
+            }),
         ];
 
         if let Some(auto_scroll) = self.auto_scroll {
