@@ -958,6 +958,8 @@ impl App {
                             };
                             if let Some(title) = title_opt {
                                 self.tab_model.text_set(entity, title);
+                                // Trigger change indicator update
+                                let _ = self.update(Message::TabChanged(entity));
                             }
                         }
                     }
