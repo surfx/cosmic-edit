@@ -1,4 +1,8 @@
-# Cosmic Edit (Modificado por surfx)
+# Cosmic Edit (fork)
+
+Sessões habilitadas no cosmic edit
+
+![Cosmic Edit Sessoes](res/screenshots/cosmic_fork_sessoes.png)
 
 Este é um fork do [cosmic-edit](https://github.com/pop-os/cosmic-edit) com melhorias focadas em produtividade e experiência de usuário.
 
@@ -25,12 +29,20 @@ Localizados na pasta `scripts/`:
 *   **Filtros de Log**: O terminal agora exibe logs limpos, ocultando erros irrelevantes de DBus/WGPU e focando nas ações do usuário.
 *   **Limpeza de Código**: Removidos avisos de compilação (dead code) e variáveis não utilizadas.
 
+### 5. Substituição do Editor do Sistema
+Foi criado um script de instalação (`scripts/install_system_links.sh`) que permite usar esta versão modificada como o editor padrão do seu perfil de usuário:
+*   **Override de Binário**: Cria um link em `~/.local/bin/cosmic-edit` para que o comando no terminal abra esta versão.
+*   **Override de Menu**: Substitui o atalho original do COSMIC no menu de aplicativos para lançar esta versão com todas as melhorias.
+
 ## Como Executar
 ```bash
-# Via terminal
-./scripts/run.sh
+# Para integrar com o seu sistema (fazer uma vez):
+./scripts/install_system_links.sh
 
-# Ou via menu do sistema procurando por "Cosmic Edit (Dev)"
+# Via terminal
+cosmic-edit
+
+# Ou via menu do sistema procurando pelo ícone oficial do Cosmic Edit
 ```
 
 ---

@@ -7,3 +7,5 @@ Icon=/mnt/disco_d/projetos/rust/cosmic-edit/scripts/com.system76.CosmicEdit.svg
 Terminal=false
 Type=Application
 Categories=Development;TextEditor;
+
+# cp /mnt/disco_d/projetos/rust/cosmic-edit/scripts/cosmic-edit.desktop ~/.local/share/applications/
