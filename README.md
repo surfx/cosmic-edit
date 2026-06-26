@@ -1,3 +1,7 @@
+# Obs:
+
+Este é o README orginal do projeto [COSMIC EDITOR](https://github.com/pop-os/cosmic-edit), criei um fork do projeto, todos os direitos reservados aos autores. Para entender o que foi feito nesse fork, leia mais em [README_FORK.md](https://github.com/surfx/cosmic-edit/blob/master/README_FORK.md)
+
 # COSMIC Text Editor
 Text editor for the COSMIC desktop
 
