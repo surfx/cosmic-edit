@@ -19,6 +19,7 @@ ln -sf "$PROJECT_DIR/scripts/run.sh" "$LOCAL_BIN_DIR/cosmic-edit"
 # 3. Substitui o atalho do sistema
 # Remove o atalho original se existir na pasta de usuário para evitar conflitos
 rm -f "$DESKTOP_DIR/com.system76.CosmicEdit.desktop"
+rm -f "$DESKTOP_DIR/cosmic-edit.desktop"
 
 # Copia o nosso atalho com o nome padrão do sistema para sobrepor o ícone do menu
 cp "$PROJECT_DIR/scripts/cosmic-edit.desktop" "$DESKTOP_DIR/com.system76.CosmicEdit.desktop"
