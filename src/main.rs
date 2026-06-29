@@ -132,14 +132,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = env::args().skip(1).collect();
 
         if socket_path.exists() {
+            let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
             for _ in 0..3 {
                 if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
                     use std::io::Write;
-                    let message = if args.is_empty() {
-                        "__FOCUS__".to_string()
+                    let mut message = String::new();
+                    if let Some(token) = activation_token {
+                        message.push_str("__TOKEN__:");
+                        message.push_str(&token);
+                        message.push('\n');
+                    }
+                    if args.is_empty() {
+                        message.push_str("__FOCUS__");
                     } else {
-                        args.join("\n")
-                    };
+                        message.push_str(&args.join("\n"));
+                    }
                     let _ = stream.write_all(message.as_bytes());
                     return Ok(());
                 }
@@ -148,18 +155,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = std::fs::remove_file(&socket_path);
         }
 
-        match fork::daemon(true, true) {
-            Ok(fork::Fork::Child) => {
-                if let Ok(listener) = std::os::unix::net::UnixListener::bind(&socket_path) {
-                    let _ = listener.set_nonblocking(true);
-                    UNIX_LISTENER.get_or_init(|| Mutex::new(Some(listener)));
-                }
-            }
-            Ok(fork::Fork::Parent(_child_pid)) => process::exit(0),
-            Err(err) => {
-                eprintln!("failed to daemonize: {:?}", err);
-                process::exit(1);
-            }
+        if let Ok(listener) = std::os::unix::net::UnixListener::bind(&socket_path) {
+            let _ = listener.set_nonblocking(true);
+            UNIX_LISTENER.get_or_init(|| Mutex::new(Some(listener)));
         }
     }
 
@@ -424,6 +422,7 @@ pub enum Message {
     Redo,
     ReorderTab(ReorderEvent),
     RequestFocus,
+    ActivateSurface(window::Id, Option<String>),
     RevertAllChanges,
     Save(Option<segmented_button::Entity>),
     SaveAll,
@@ -1065,12 +1064,15 @@ impl App {
             None => "No Open File".to_string(),
         };
 
+        let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+
         let window_title = format!("{title} - {}", fl!("cosmic-text-editor"));
         Task::batch([
             if let Some(window_id) = self.core.main_window_id() {
                 Task::batch([
                     self.set_window_title(window_title, window_id),
-                    window::gain_focus(window_id),
+                    window::set_mode(window_id, window::Mode::Windowed),
+                    self.update(Message::ActivateSurface(window_id, token)),
                 ])
             } else {
                 Task::none()
@@ -2498,7 +2500,7 @@ impl Application for App {
                 }
             },
             Message::OpenFile(path) => {
-                log::info!("// REMOVER: Action: OpenFile {:?}", path);
+                log::info!("Opening file via Message::OpenFile: {:?}", path);
                 if path.is_dir() {
                     self.open_project(path);
                 } else {
@@ -2785,6 +2787,22 @@ impl Application for App {
             }
             Message::RequestFocus => {
                 if let Some(window_id) = self.core.main_window_id() {
+                    let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+                    log::info!("Requesting focus for window {:?} with token {:?}", window_id, token);
+                    return Task::batch([
+                        window::set_mode(window_id, window::Mode::Windowed),
+                        self.update(Message::ActivateSurface(window_id, token)),
+                    ]);
+                }
+            }
+            Message::ActivateSurface(window_id, token_opt) => {
+                if let Some(token) = token_opt {
+                    // Use the activation token to jump to front
+                    return cosmic::task::message(cosmic::Action::Cosmic(
+                        cosmic::app::Action::Activate(token),
+                    ));
+                } else {
+                    // Fallback to gain_focus
                     return window::gain_focus(window_id);
                 }
             }
@@ -3706,14 +3724,25 @@ impl Application for App {
                             if let Ok((mut stream, _)) = listener.accept().await {
                                 let mut buffer = String::new();
                                 if stream.read_to_string(&mut buffer).await.is_ok() {
-                                    if buffer == "__FOCUS__" {
-                                        let _ = output.send(Message::RequestFocus).await;
-                                    } else {
-                                        for line in buffer.lines() {
+                                    for line in buffer.lines() {
+                                        log::info!("Received line from socket: {:?}", line);
+                                        if line.starts_with("__TOKEN__:") {
+                                            let token = &line["__TOKEN__:".len()..];
+                                            log::info!("Setting XDG_ACTIVATION_TOKEN: {:?}", token);
+                                            unsafe {
+                                                std::env::set_var("XDG_ACTIVATION_TOKEN", token);
+                                            }
+                                        } else if line == "__FOCUS__" {
+                                            log::info!("Received __FOCUS__ command");
+                                            let _ = output.send(Message::RequestFocus).await;
+                                        } else {
                                             let path = PathBuf::from(line);
+                                            log::info!("Opening path from socket: {:?}", path);
                                             let _ = output.send(Message::OpenFile(path)).await;
                                         }
                                     }
+                                    log::info!("Sending final RequestFocus after processing socket buffer");
+                                    let _ = output.send(Message::RequestFocus).await;
                                 }
                             }
                         }

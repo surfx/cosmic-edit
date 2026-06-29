@@ -52,9 +52,6 @@ default-features = false
 #TODO: a11y feature crashes file choser dialog
 features = ["about", "multi-window", "tokio", "winit", "surface-message", "xdg-portal"]
 
-[target.'cfg(unix)'.dependencies]
-fork = "0.2"
-
 [build-dependencies]
 xdgen = "0.1"
 
