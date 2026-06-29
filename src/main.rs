@@ -39,6 +39,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 use tokio::time;
+use tokio::io::AsyncReadExt;
 use unicode_segmentation::UnicodeSegmentation;
 
 use config::{AppTheme, CONFIG_VERSION, Config, ConfigState};
@@ -165,43 +166,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ICON_CACHE.get_or_init(|| Mutex::new(IconCache::new()));
     LINE_NUMBER_CACHE.get_or_init(|| Mutex::new(LineNumberCache::new()));
     SWASH_CACHE.get_or_init(|| Mutex::new(SwashCache::new()));
-    SYNTAX_SYSTEM.get_or_init(|| {
-        let lazy_theme_set = two_face::theme::LazyThemeSet::from(two_face::theme::extra());
-        let mut theme_set = syntect::highlighting::ThemeSet::from(&lazy_theme_set);
-        // Hardcoded COSMIC themes
-        for (theme_name, theme_data) in &[
-            ("COSMIC Dark", cosmic_syntax_theme::COSMIC_DARK_TM_THEME),
-            ("COSMIC Light", cosmic_syntax_theme::COSMIC_LIGHT_TM_THEME),
-        ] {
-            let mut cursor = io::Cursor::new(theme_data);
-            match syntect::highlighting::ThemeSet::load_from_reader(&mut cursor) {
-                Ok(mut theme) => {
-                    // Use libcosmic theme for background and gutter
-                    theme.settings.background = Some(syntect::highlighting::Color {
-                        r: 0,
-                        g: 0,
-                        b: 0,
-                        a: 0,
-                    });
-                    theme.settings.gutter = Some(syntect::highlighting::Color {
-                        r: 0,
-                        g: 0,
-                        b: 0,
-                        a: 0,
-                    });
-                    theme_set.themes.insert(theme_name.to_string(), theme);
-                }
-                Err(err) => {
-                    eprintln!("failed to load {:?} syntax theme: {}", theme_name, err);
-                }
-            }
-        }
-        SyntaxSystem {
-            //TODO: store newlines in buffer
-            syntax_set: two_face::syntax::extra_no_newlines(),
-            theme_set,
-        }
-    });
 
     localize::localize();
 
@@ -427,6 +391,7 @@ pub enum Message {
     FileDropped(Vec<PathBuf>),
     FileTransferRequested(String),
     FileTransferResult(Result<Vec<String>, String>),
+    FontNamesLoaded(Vec<String>),
     Focus(window::Id),
     GitProjectStatus(Vec<(String, PathBuf, Vec<GitStatus>)>),
     GitStage(PathBuf, PathBuf),
@@ -458,6 +423,7 @@ pub enum Message {
     QuitForce,
     Redo,
     ReorderTab(ReorderEvent),
+    RequestFocus,
     RevertAllChanges,
     Save(Option<segmented_button::Entity>),
     SaveAll,
@@ -468,6 +434,7 @@ pub enum Message {
     Surface(surface::Action),
     SystemThemeModeChange(cosmic_theme::ThemeMode),
     SyntaxTheme(usize, bool),
+    SyntaxSystemLoaded(Vec<String>),
     TabActivate(segmented_button::Entity),
     TabActivateJump(usize),
     TabChanged(segmented_button::Entity),
@@ -1101,7 +1068,10 @@ impl App {
         let window_title = format!("{title} - {}", fl!("cosmic-text-editor"));
         Task::batch([
             if let Some(window_id) = self.core.main_window_id() {
-                self.set_window_title(window_title, window_id)
+                Task::batch([
+                    self.set_window_title(window_title, window_id),
+                    window::gain_focus(window_id),
+                ])
             } else {
                 Task::none()
             },
@@ -1614,36 +1584,11 @@ impl Application for App {
 
         let app_themes = vec![fl!("match-desktop"), fl!("dark"), fl!("light")];
 
-        let font_names = {
-            let mut font_names = Vec::new();
-            let mut font_system = font_system().write().unwrap();
-            for face in font_system.raw().db().faces() {
-                if face.monospaced {
-                    //TODO: get localized name if possible
-                    let font_name = face
-                        .families
-                        .first()
-                        .map_or_else(|| face.post_script_name.to_string(), |x| x.0.to_string());
-                    if !font_names.contains(&font_name) {
-                        font_names.push(font_name);
-                    }
-                }
-            }
-            font_names.sort();
-            font_names
-        };
-
         let mut font_size_names = Vec::new();
         let mut font_sizes = Vec::new();
         for font_size in 4..=32 {
             font_size_names.push(format!("{}px", font_size));
             font_sizes.push(font_size);
-        }
-
-        let mut theme_names =
-            Vec::with_capacity(SYNTAX_SYSTEM.get().unwrap().theme_set.themes.len());
-        for (theme_name, _theme) in SYNTAX_SYSTEM.get().unwrap().theme_set.themes.iter() {
-            theme_names.push(theme_name.to_string());
         }
 
         let mut zoom_step_names = Vec::new();
@@ -1682,10 +1627,10 @@ impl Application for App {
             zoom_step_names,
             zoom_steps,
             app_themes,
-            font_names,
+            font_names: Vec::new(),
             font_size_names,
             font_sizes,
-            theme_names,
+            theme_names: Vec::new(),
             context_page: ContextPage::Settings,
             text_box_id: widget::Id::unique(),
             dnd_id: widget::Id::unique(),
@@ -1730,7 +1675,73 @@ impl Application for App {
         }
 
         //TODO: try update_config here? It breaks loading system theme by default
-        let command = app.update_tab();
+        let command = Task::batch([
+            app.update_tab(),
+            Task::perform(async {
+                let mut font_names = Vec::new();
+                let mut font_system = font_system().write().unwrap();
+                for face in font_system.raw().db().faces() {
+                    if face.monospaced {
+                        //TODO: get localized name if possible
+                        let font_name = face
+                            .families
+                            .first()
+                            .map_or_else(|| face.post_script_name.to_string(), |x| x.0.to_string());
+                        if !font_names.contains(&font_name) {
+                            font_names.push(font_name);
+                        }
+                    }
+                }
+                font_names.sort();
+                Message::FontNamesLoaded(font_names)
+            }, action::app),
+            Task::perform(async {
+                SYNTAX_SYSTEM.get_or_init(|| {
+                    let lazy_theme_set = two_face::theme::LazyThemeSet::from(two_face::theme::extra());
+                    let mut theme_set = syntect::highlighting::ThemeSet::from(&lazy_theme_set);
+                    // Hardcoded COSMIC themes
+                    for (theme_name, theme_data) in &[
+                        ("COSMIC Dark", cosmic_syntax_theme::COSMIC_DARK_TM_THEME),
+                        ("COSMIC Light", cosmic_syntax_theme::COSMIC_LIGHT_TM_THEME),
+                    ] {
+                        let mut cursor = io::Cursor::new(theme_data);
+                        match syntect::highlighting::ThemeSet::load_from_reader(&mut cursor) {
+                            Ok(mut theme) => {
+                                // Use libcosmic theme for background and gutter
+                                theme.settings.background = Some(syntect::highlighting::Color {
+                                    r: 0,
+                                    g: 0,
+                                    b: 0,
+                                    a: 0,
+                                });
+                                theme.settings.gutter = Some(syntect::highlighting::Color {
+                                    r: 0,
+                                    g: 0,
+                                    b: 0,
+                                    a: 0,
+                                });
+                                theme_set.themes.insert(theme_name.to_string(), theme);
+                            }
+                            Err(err) => {
+                                eprintln!("failed to load {:?} syntax theme: {}", theme_name, err);
+                            }
+                        }
+                    }
+                    SyntaxSystem {
+                        //TODO: store newlines in buffer
+                        syntax_set: two_face::syntax::extra_no_newlines(),
+                        theme_set,
+                    }
+                });
+
+                let mut theme_names =
+                    Vec::with_capacity(SYNTAX_SYSTEM.get().unwrap().theme_set.themes.len());
+                for (theme_name, _theme) in SYNTAX_SYSTEM.get().unwrap().theme_set.themes.iter() {
+                    theme_names.push(theme_name.to_string());
+                }
+                Message::SyntaxSystemLoaded(theme_names)
+            }, action::app),
+        ]);
         (app, command)
     }
 
@@ -2236,6 +2247,9 @@ impl Application for App {
                         log::error!("File transfer failed: {}", err);
                     }
                 }
+            }
+            Message::FontNamesLoaded(font_names) => {
+                self.font_names = font_names;
             }
             Message::FindFocused(has_focus) => {
                 if let Some(f) = self.find_opt.as_mut() {
@@ -2769,6 +2783,11 @@ impl Application for App {
             }) => {
                 _ = self.tab_model.reorder(dragged, target, position);
             }
+            Message::RequestFocus => {
+                if let Some(window_id) = self.core.main_window_id() {
+                    return window::gain_focus(window_id);
+                }
+            }
             Message::RevertAllChanges => {
                 if let Some(Tab::Editor(tab)) = self.active_tab_mut() {
                     tab.reload();
@@ -2901,6 +2920,18 @@ impl Application for App {
                     log::warn!("failed to find syntax theme with index {}", index);
                 }
             },
+            Message::SyntaxSystemLoaded(theme_names) => {
+                self.theme_names = theme_names;
+                // Force a redraw and update syntax system of all tabs
+                let entities: Vec<_> = self.tab_model.iter().collect();
+                for entity in entities {
+                    if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
+                        tab.set_config(&self.config);
+                        let mut editor = tab.editor.lock().unwrap();
+                        editor.set_redraw(true);
+                    }
+                }
+            }
             Message::TabActivate(entity) => {
                 log::info!("// REMOVER: Action: TabActivate {:?}", entity);
                 // Close save changes dialog if switching to a different tab for consistency
@@ -3659,17 +3690,24 @@ impl Application for App {
                             UNIX_LISTENER.get().and_then(|m| m.lock().unwrap().take());
 
                         let listener = match listener {
-                            Some(l) => l,
+                            Some(l) => {
+                                match tokio::net::UnixListener::from_std(l) {
+                                    Ok(l) => l,
+                                    Err(err) => {
+                                        log::error!("failed to convert unix listener to tokio: {}", err);
+                                        return futures::future::pending().await;
+                                    }
+                                }
+                            }
                             None => return futures::future::pending().await,
                         };
 
                         loop {
-                            if let Ok((mut stream, _)) = listener.accept() {
+                            if let Ok((mut stream, _)) = listener.accept().await {
                                 let mut buffer = String::new();
-                                use std::io::Read;
-                                if stream.read_to_string(&mut buffer).is_ok() {
+                                if stream.read_to_string(&mut buffer).await.is_ok() {
                                     if buffer == "__FOCUS__" {
-                                        let _ = output.send(Message::None).await;
+                                        let _ = output.send(Message::RequestFocus).await;
                                     } else {
                                         for line in buffer.lines() {
                                             let path = PathBuf::from(line);
@@ -3678,7 +3716,6 @@ impl Application for App {
                                     }
                                 }
                             }
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     },
                 )

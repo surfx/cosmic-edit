@@ -5,14 +5,16 @@ use cosmic::{
     widget::icon,
 };
 use cosmic_files::mime_icon::{FALLBACK_MIME_ICON, mime_for_path, mime_icon};
-use cosmic_text::{Attrs, Buffer, Cursor, Edit, Selection, Shaping, SyntaxEditor, ViEditor, Wrap};
+use cosmic_text::{
+    Attrs, Buffer, Cursor, Edit, Selection, Shaping, SyntaxEditor, SyntaxSystem, ViEditor, Wrap,
+};
 use regex::Regex;
 use std::{
     fs,
     io::{self, Write},
     path::{self, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use crate::{Config, SYNTAX_SYSTEM, fl, git::GitDiff};
@@ -64,12 +66,42 @@ impl EditorTab {
         buffer.set_size(Some(0.0), Some(0.0));
         buffer.set_text("", &attrs, Shaping::Advanced, None);
 
-        let editor = SyntaxEditor::new(
-            Arc::new(buffer),
-            SYNTAX_SYSTEM.get().unwrap(),
-            config.syntax_theme(),
-        )
-        .unwrap();
+        let syntax_system = SYNTAX_SYSTEM.get().unwrap_or_else(|| {
+            static DEFAULT_SYNTAX_SYSTEM: OnceLock<SyntaxSystem> = OnceLock::new();
+            DEFAULT_SYNTAX_SYSTEM.get_or_init(|| {
+                let lazy_theme_set = two_face::theme::LazyThemeSet::from(two_face::theme::extra());
+                let theme_set = syntect::highlighting::ThemeSet::from(&lazy_theme_set);
+                SyntaxSystem {
+                    syntax_set: two_face::syntax::extra_no_newlines(),
+                    theme_set,
+                }
+            })
+        });
+
+        let theme_name = config.syntax_theme();
+        let theme_name = if syntax_system.theme_set.themes.contains_key(theme_name) {
+            theme_name
+        } else {
+            syntax_system
+                .theme_set
+                .themes
+                .keys()
+                .next()
+                .map(|s| s.as_str())
+                .unwrap_or(theme_name)
+        };
+
+        let editor = SyntaxEditor::new(Arc::new(buffer), syntax_system, theme_name).unwrap_or_else(
+            || {
+                // Extremely basic fallback if everything else fails
+                SyntaxEditor::new(
+                    Arc::new(Buffer::new_empty(config.metrics(zoom_adj))),
+                    syntax_system,
+                    "",
+                )
+                .expect("failed to create SyntaxEditor even with empty theme")
+            },
+        );
 
         let mut tab = Self {
             path_opt: None,
