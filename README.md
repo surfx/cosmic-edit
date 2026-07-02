@@ -52,11 +52,6 @@ cosmic-edit
 
 # Ou via menu do sistema procurando pelo ícone oficial do Cosmic Edit
 ```
-
----
-Modificações realizadas via Gemini CLI em colaboração com o usuário surfx.
-
-
 # COSMIC Text Editor
 Text editor for the COSMIC desktop
 
