@@ -589,7 +589,6 @@ impl App {
 
     pub fn open_project<P: AsRef<Path>>(&mut self, path: P) {
         let path = path.as_ref();
-        log::info!("// REMOVER: open_project called with path: {:?}", path);
         let node = match ProjectNode::new(path) {
             Ok(mut node) => {
                 match &mut node {
@@ -604,13 +603,11 @@ impl App {
 
                         for (_project_name, project_path) in self.projects.iter() {
                             if project_path == path {
-                                log::info!("// REMOVER: Project already open: {:?}", path);
                                 // Project already open
                                 return;
                             }
                         }
 
-                        log::info!("// REMOVER: Adding project {:?} to sidebar", path);
                         // Save the absolute path
                         self.projects.push((name.to_string(), path.to_path_buf()));
                         self.update_watcher();
@@ -650,18 +647,14 @@ impl App {
 
         let position = self.nav_model.position(id).unwrap_or(0);
         self.open_folder(path, position + 1, 1);
-        log::info!("// REMOVER: Project {:?} opened successfully", path);
     }
 
     pub fn open_tab(&mut self, path_opt: Option<PathBuf>) -> Option<segmented_button::Entity> {
-        log::info!("// REMOVER: open_tab called with path: {:?}", path_opt);
         match self.new_tab(path_opt.clone())? {
             NewTab::Exists(entity) => {
-                log::info!("// REMOVER: Tab already exists for {:?}, entity: {:?}", path_opt, entity);
                 Some(entity)
             }
             NewTab::Tab(tab) => {
-                log::info!("// REMOVER: Creating new EditorTab for {:?}", path_opt);
                 let entity = self
                     .tab_model
                     .insert()
@@ -672,7 +665,6 @@ impl App {
                     .activate()
                     .id();
                 self.update_watcher();
-                log::info!("// REMOVER: New tab created with entity {:?}", entity);
                 Some(entity)
             }
         }
@@ -800,7 +792,6 @@ impl App {
     }
 
     fn save_session(&self) {
-        log::info!("// REMOVER: Starting save_session");
         let mut session = Session::default();
         let backups_dir = backups_dir_path();
         let _ = fs::remove_dir_all(&backups_dir);
@@ -811,13 +802,11 @@ impl App {
 
         for (i, entity) in self.tab_model.iter().enumerate() {
             if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
-                log::info!("// REMOVER: Saving tab {}: {:?}", i, tab.path_opt);
                 let mut backup_path = None;
                 let is_modified = tab.changed();
                 if is_modified {
                     let bname = format!("backup_{}.txt", i);
                     let bpath = backups_dir.join(bname);
-                    log::info!("// REMOVER: Creating backup for modified file: {:?}", bpath);
                     if let Err(err) = fs::write(&bpath, tab.text()) {
                         log::error!("failed to write backup: {}", err);
                     } else {
@@ -850,27 +839,21 @@ impl App {
         }
 
         for (_name, path) in &self.projects {
-            log::info!("// REMOVER: Saving project: {:?}", path);
             session.projects.push(path.clone());
         }
 
         if let Err(err) = session.save() {
             log::error!("failed to save session: {}", err);
         }
-        log::info!("// REMOVER: Session saved successfully");
     }
 
     fn restore_session(&mut self) {
-        log::info!("// REMOVER: Starting restore_session");
         let session = Session::load();
-        log::info!("// REMOVER: Loaded session data: {} tabs, {} projects", session.tabs.len(), session.projects.len());
         for path in session.projects {
-            log::info!("// REMOVER: Restoring project: {:?}", path);
             self.open_project(path);
         }
 
         for (i, stab) in session.tabs.into_iter().enumerate() {
-            log::info!("// REMOVER: Restoring tab {}: path={:?}, modified={}", i, stab.path, stab.is_modified);
             let entity_opt = if let Some(path) = stab.path {
                 let mut disk_newer = false;
                 if let Some(saved_mtime) = stab.mtime {
@@ -878,7 +861,6 @@ impl App {
                         if let Ok(modified) = metadata.modified() {
                             if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
                                 if duration.as_secs() > saved_mtime {
-                                    log::warn!("// REMOVER: File on disk is newer than session: {:?}", path);
                                     disk_newer = true;
                                 }
                             }
@@ -890,7 +872,6 @@ impl App {
                 if let Some(entity) = entity {
                     if !disk_newer {
                         if let Some(backup_path) = stab.backup_path {
-                            log::info!("// REMOVER: Applying backup for tab {}: {:?}", i, backup_path);
                             if let Ok(text) = fs::read_to_string(backup_path) {
                                 let title_opt = if let Some(Tab::Editor(tab)) =
                                     self.tab_model.data_mut::<Tab>(entity)
@@ -915,7 +896,6 @@ impl App {
                 let entity = self.open_tab(None);
                 if let Some(entity) = entity {
                     if let Some(backup_path) = stab.backup_path {
-                        log::info!("// REMOVER: Restoring unsaved scratch tab from: {:?}", backup_path);
                         if let Ok(text) = fs::read_to_string(backup_path) {
                             let title_opt = if let Some(Tab::Editor(tab)) =
                                 self.tab_model.data_mut::<Tab>(entity)
@@ -938,12 +918,10 @@ impl App {
 
             if Some(i) == session.active_tab_index {
                 if let Some(entity) = entity_opt {
-                    log::info!("// REMOVER: Re-activating tab index {}", i);
                     self.tab_model.activate(entity);
                 }
             }
         }
-        log::info!("// REMOVER: Session restoration complete");
     }
 
     fn update_dialogs(&mut self) -> Task<Message> {
@@ -1896,7 +1874,6 @@ impl Application for App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        log::info!("// REMOVER: App::update received message: {:?}", message);
         // Helper for updating config values efficiently
         macro_rules! config_set {
             ($name: ident, $value: expr) => {
@@ -2098,10 +2075,27 @@ impl Application for App {
                 }
             }
             Message::Find(find_opt) => {
-                self.find_opt = find_opt.map(|f| FindField {
-                    replace: f,
-                    has_focus: true,
-                });
+                if let Some(replace) = find_opt {
+                    let selection_opt = if let Some(Tab::Editor(tab)) = self.active_tab() {
+                        let editor = tab.editor.lock().unwrap();
+                        editor.copy_selection()
+                    } else {
+                        None
+                    };
+
+                    if let Some(selection) = selection_opt {
+                        if !selection.is_empty() {
+                            self.find_search_value = selection;
+                        }
+                    }
+
+                    self.find_opt = Some(FindField {
+                        replace,
+                        has_focus: true,
+                    });
+                } else {
+                    self.find_opt = None;
+                }
 
                 // Focus correct input
                 return self.update_focus();
@@ -2350,7 +2344,6 @@ impl Application for App {
                 self.modifiers = modifiers;
             }
             Message::NewFile => {
-                log::info!("// REMOVER: Action: NewFile");
                 self.open_tab(None);
                 return self.update_tab();
             }
@@ -2973,7 +2966,6 @@ impl Application for App {
                 }
             }
             Message::TabActivate(entity) => {
-                log::info!("// REMOVER: Action: TabActivate {:?}", entity);
                 // Close save changes dialog if switching to a different tab for consistency
                 if self.dialog_page_opt != Some(DialogPage::PromptSaveClose(entity)) {
                     self.dialog_page_opt = None;
@@ -2999,7 +2991,6 @@ impl Application for App {
                 }
             }
             Message::TabChanged(entity) => {
-                log::info!("// REMOVER: Action: TabChanged {:?}", entity);
                 if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
                     let mut title = tab.title();
                     //TODO: better way of adding change indicator
@@ -3010,7 +3001,6 @@ impl Application for App {
                 }
             }
             Message::TabClose(entity) => {
-                log::info!("// REMOVER: Action: TabClose {:?}", entity);
                 match self.tab_model.data_mut::<Tab>(entity) {
                     // Only match a changed editor tab...
                     Some(Tab::Editor(tab)) if tab.changed() => {
@@ -3133,6 +3123,21 @@ impl Application for App {
                 } else {
                     self.context_page = context_page;
                     self.core.window.show_context = true;
+                }
+
+                if self.core.window.show_context && self.context_page == ContextPage::ProjectSearch {
+                    let selection_opt = if let Some(Tab::Editor(tab)) = self.active_tab() {
+                        let editor = tab.editor.lock().unwrap();
+                        editor.copy_selection()
+                    } else {
+                        None
+                    };
+
+                    if let Some(selection) = selection_opt {
+                        if !selection.is_empty() {
+                            self.project_search_value = selection;
+                        }
+                    }
                 }
 
                 self.project_search_has_focus = self.core.window.show_context
