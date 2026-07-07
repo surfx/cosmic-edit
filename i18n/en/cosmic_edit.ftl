@@ -35,6 +35,11 @@ prompt-unsaved-changes = You have unsaved changes. If you continue without savin
 cancel = Cancel
 discard = Discard changes
 save-all = Save all
+ok = OK
+
+## File too large
+file-too-large-title = File too large
+file-too-large-body = The file "{$path}" is too large to open. Files larger than {$size} are not supported.
 
 ## Settings
 settings = Settings

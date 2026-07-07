@@ -71,7 +71,7 @@ mod search;
 use self::session::{Session, SessionTab, backups_dir_path};
 mod session;
 
-use self::tab::{EditorTab, GitDiffTab, Tab};
+use self::tab::{EditorTab, GitDiffTab, Tab, MAX_FILE_SIZE};
 mod tab;
 
 use self::text_box::text_box;
@@ -469,6 +469,7 @@ pub enum ContextPage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DialogPage {
     PromptSaveClose(segmented_button::Entity),
+    FileTooLarge(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -726,6 +727,19 @@ impl App {
 
                 self.add_to_recents(&canonical);
 
+                match fs::metadata(&canonical) {
+                    Ok(metadata) => {
+                        if metadata.len() > MAX_FILE_SIZE {
+                            log::error!("file too large: {:?}", canonical);
+                            self.dialog_page_opt = Some(DialogPage::FileTooLarge(canonical));
+                            return None;
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("failed to get metadata for {:?}: {}", canonical, err);
+                    }
+                }
+
                 let mut tab = EditorTab::new(&self.config);
                 tab.open(canonical);
                 Some(NewTab::Tab(tab))
@@ -872,19 +886,26 @@ impl App {
                 if let Some(entity) = entity {
                     if !disk_newer {
                         if let Some(backup_path) = stab.backup_path {
-                            if let Ok(text) = fs::read_to_string(backup_path) {
-                                let title_opt = if let Some(Tab::Editor(tab)) =
-                                    self.tab_model.data_mut::<Tab>(entity)
-                                {
-                                    tab.set_text(&text, true);
-                                    Some(tab.title())
-                                } else {
-                                    None
-                                };
-                                if let Some(title) = title_opt {
-                                    self.tab_model.text_set(entity, title);
-                                    // Trigger change indicator update
-                                    let _ = self.update(Message::TabChanged(entity));
+                            match fs::metadata(&backup_path) {
+                                Ok(metadata) if metadata.len() > MAX_FILE_SIZE => {
+                                    log::error!("backup too large: {:?}", backup_path);
+                                }
+                                _ => {
+                                    if let Ok(text) = fs::read_to_string(backup_path) {
+                                        let title_opt = if let Some(Tab::Editor(tab)) =
+                                            self.tab_model.data_mut::<Tab>(entity)
+                                        {
+                                            tab.set_text(&text, true);
+                                            Some(tab.title())
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(title) = title_opt {
+                                            self.tab_model.text_set(entity, title);
+                                            // Trigger change indicator update
+                                            let _ = self.update(Message::TabChanged(entity));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -896,19 +917,26 @@ impl App {
                 let entity = self.open_tab(None);
                 if let Some(entity) = entity {
                     if let Some(backup_path) = stab.backup_path {
-                        if let Ok(text) = fs::read_to_string(backup_path) {
-                            let title_opt = if let Some(Tab::Editor(tab)) =
-                                self.tab_model.data_mut::<Tab>(entity)
-                            {
-                                tab.set_text(&text, true);
-                                Some(tab.title())
-                            } else {
-                                None
-                            };
-                            if let Some(title) = title_opt {
-                                self.tab_model.text_set(entity, title);
-                                // Trigger change indicator update
-                                let _ = self.update(Message::TabChanged(entity));
+                        match fs::metadata(&backup_path) {
+                            Ok(metadata) if metadata.len() > MAX_FILE_SIZE => {
+                                log::error!("backup too large: {:?}", backup_path);
+                            }
+                            _ => {
+                                if let Ok(text) = fs::read_to_string(backup_path) {
+                                    let title_opt = if let Some(Tab::Editor(tab)) =
+                                        self.tab_model.data_mut::<Tab>(entity)
+                                    {
+                                        tab.set_text(&text, true);
+                                        Some(tab.title())
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(title) = title_opt {
+                                        self.tab_model.text_set(entity, title);
+                                        // Trigger change indicator update
+                                        let _ = self.update(Message::TabChanged(entity));
+                                    }
+                                }
                             }
                         }
                     }
@@ -937,6 +965,7 @@ impl App {
                     self.dialog_page_opt = None;
                 }
             }
+            Some(DialogPage::FileTooLarge(_)) => {}
             None => {}
         }
         Task::none()
@@ -1868,6 +1897,20 @@ impl Application for App {
                     .primary_action(save_button)
                     .secondary_action(discard_button)
                     .tertiary_action(cancel_button);
+                Some(dialog.into())
+            }
+            DialogPage::FileTooLarge(path) => {
+                let ok_button =
+                    widget::button::suggested(fl!("ok")).on_press(Message::DialogCancel);
+                let dialog = widget::dialog()
+                    .title(fl!("file-too-large-title"))
+                    .body(fl!(
+                        "file-too-large-body",
+                        path = path.to_string_lossy(),
+                        size = format!("{}MB", MAX_FILE_SIZE / 1024 / 1024)
+                    ))
+                    .primary_action(ok_button);
+
                 Some(dialog.into())
             }
         }

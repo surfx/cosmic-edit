@@ -17,6 +17,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+pub const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100MB
+
 use crate::{Config, SYNTAX_SYSTEM, fl, git::GitDiff};
 
 fn editor_text(editor: &ViEditor<'static, 'static>) -> String {
@@ -175,6 +177,14 @@ impl EditorTab {
             // Save scroll
             let scroll = editor.with_buffer(|buffer| buffer.scroll());
             //TODO: save/restore more?
+
+            match fs::metadata(path) {
+                Ok(metadata) if metadata.len() > MAX_FILE_SIZE => {
+                    log::error!("reload file too large: {:?}", path);
+                    return;
+                }
+                _ => (),
+            }
 
             match std::fs::read_to_string(path) {
                 Ok(file_content) => {
